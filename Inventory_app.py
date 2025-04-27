@@ -1,6 +1,6 @@
+
 import streamlit as st
 import pandas as pd
-import base64
 import av
 import cv2
 import numpy as np
@@ -72,117 +72,138 @@ def get_table_download_link(df):
 
 # App pages
 def manage_departments():
-    st.subheader("📂 Department Management")
-    # ... (same department management code from previous version) ...
+    st.subheader("Department Management")
+    
+    with st.expander("Add New Department"):
+        with st.form("department_form"):
+            dept_name = st.text_input("Department Name")
+            submit = st.form_submit_button("Add Department")
+            
+            if submit:
+                if not dept_name:
+                    st.error("Please enter a department name")
+                else:
+                    try:
+                        new_dept = Department(name=dept_name)
+                        session.add(new_dept)
+                        session.commit()
+                        st.success(f"Department '{dept_name}' added!")
+                    except:
+                        st.error("Department name already exists")
+
+    with st.expander("Edit/Delete Departments"):
+        departments = session.query(Department).all()
+        if departments:
+            selected_dept = st.selectbox("Select Department", 
+                                        departments, format_func=lambda x: x.name)
+            
+            with st.form("edit_dept_form"):
+                new_name = st.text_input("New Name", value=selected_dept.name)
+                col1, col2 = st.columns(2)
+                with col1:
+                    update_btn = st.form_submit_button("Update")
+                with col2:
+                    delete_btn = st.form_submit_button("Delete")
+                
+                if update_btn:
+                    selected_dept.name = new_name
+                    session.commit()
+                    st.success("Department updated!")
+                if delete_btn:
+                    session.delete(selected_dept)
+                    session.commit()
+                    st.success("Department deleted!")
+        else:
+            st.info("No departments found")
 
 def manage_items():
-    st.subheader("📦 Item Management")
-    # ... (same item management code with barcode field) ...
+    st.subheader("Item Management")
+    
+    departments = session.query(Department).all()
+    if not departments:
+        st.warning("Create departments first")
+        return
+    
+    with st.expander("Add New Item"):
+        with st.form("item_form"):
+            dept = st.selectbox("Department", departments, format_func=lambda x: x.name)
+            item_name = st.text_input("Item Name")
+            barcode = st.text_input("Barcode")
+            quantity = st.number_input("Initial Quantity", min_value=0)
+            low_stock = st.number_input("Low Stock Threshold", min_value=1)
+            submit = st.form_submit_button("Add Item")
+            
+            if submit:
+                if not item_name or not barcode:
+                    st.error("Please fill all required fields")
+                else:
+                    try:
+                        new_item = Item(
+                            name=item_name,
+                            barcode=barcode,
+                            quantity=quantity,
+                            low_stock_threshold=low_stock,
+                            department_id=dept.id
+                        )
+                        session.add(new_item)
+                        session.commit()
+                        st.success("Item added successfully!")
+                    except:
+                        st.error("Barcode must be unique")
+
+    with st.expander("Edit/Delete Items"):
+        items = session.query(Item).all()
+        if items:
+            selected_item = st.selectbox("Select Item", 
+                                       items, format_func=lambda x: f"{x.name} ({x.department.name})")
+            
+            with st.form("edit_item_form"):
+                new_name = st.text_input("Name", value=selected_item.name)
+                new_barcode = st.text_input("Barcode", value=selected_item.barcode)
+                new_qty = st.number_input("Quantity", value=selected_item.quantity)
+                new_threshold = st.number_input("Low Stock Threshold", 
+                                                value=selected_item.low_stock_threshold)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    update_btn = st.form_submit_button("Update")
+                with col2:
+                    delete_btn = st.form_submit_button("Delete")
+                
+                if update_btn:
+                    selected_item.name = new_name
+                    selected_item.barcode = new_barcode
+                    selected_item.quantity = new_qty
+                    selected_item.low_stock_threshold = new_threshold
+                    session.commit()
+                    st.success("Item updated!")
+                if delete_btn:
+                    session.delete(selected_item)
+                    session.commit()
+                    st.success("Item deleted!")
+        else:
+            st.info("No items found")
 
 def view_inventory():
-    st.subheader("📊 Current Inventory")
-    # ... (same inventory view code) ...
-
-def update_stock():
-    st.subheader("🔄 Stock Updates")
-    # ... (same stock update code) ...
-
-def import_export_data():
-    st.subheader("📤 Import/Export Data")
-    # ... (same import/export code) ...
-
-def view_stock_history():
-    st.subheader("🕰 Stock History")
-    # ... (same history view code) ...
-
-def barcode_operations():
-    st.subheader("📷 Barcode Scanner")
-    ctx = webrtc_streamer(
-        key="barcode-scanner",
-        video_processor_factory=BarcodeProcessor,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-    )
-
-    if ctx.video_processor:
-        barcode = ctx.video_processor.last_detected_barcode
-        if barcode:
-            st.session_state.last_barcode = barcode
-
-    if 'last_barcode' in st.session_state:
-        item = session.query(Item).filter_by(barcode=st.session_state.last_barcode).first()
-        if item:
-            st.success(f"Scanned: {item.name} (Barcode: {st.session_state.last_barcode})")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("📦 Current Stock")
-                st.metric("Quantity", item.quantity)
-                st.write(f"Low Stock Threshold: {item.low_stock_threshold}")
-                
-                last_addition = session.query(StockHistory).filter(
-                    StockHistory.item_id == item.id,
-                    StockHistory.change > 0
-                ).order_by(StockHistory.timestamp.desc()).first()
-                
-                if last_addition:
-                    st.write(f"Last added {last_addition.change} on {last_addition.timestamp.date()}")
-
-            with col2:
-                with st.form("outgoing_form"):
-                    qty = st.number_input("Quantity to deduct", 1, item.quantity)
-                    note = st.text_input("Reason")
-                    if st.form_submit_button("Confirm Deduction"):
-                        item.quantity -= qty
-                        history = StockHistory(
-                            item_id=item.id,
-                            change=-qty,
-                            note=f"Deduction: {note}"
-                        )
-                        session.add(history)
-                        session.commit()
-                        st.success(f"Updated {item.name} stock to {item.quantity}")
-        else:
-            st.error("No item found with this barcode")
-
-def main():
-    st.set_page_config(
-        page_title="Inventory Manager",
-        page_icon="📦",
-        layout="wide"
-    )
+    st.subheader("Current Inventory")
     
-    st.title("📦 Smart Inventory Manager")
-    
-    menu = [
-        "🏠 Dashboard",
-        "📂 Departments",
-        "📦 Items",
-        "📊 Inventory",
-        "🔄 Stock Update",
-        "📤 Import/Export",
-        "🕰 History",
-        "📷 Barcode Scan"
-    ]
-    
-    choice = st.sidebar.selectbox("Navigation", menu)
-    
-    if choice == "🏠 Dashboard":
-        st.subheader("Inventory Dashboard")
-        # Add dashboard metrics if needed
-    elif choice == "📂 Departments":
-        manage_departments()
-    elif choice == "📦 Items":
-        manage_items()
-    elif choice == "📊 Inventory":
-        view_inventory()
-    elif choice == "🔄 Stock Update":
-        update_stock()
-    elif choice == "📤 Import/Export":
-        import_export_data()
-    elif choice == "🕰 History":
-        view_stock_history()
-    elif choice == "📷 Barcode Scan":
-        barcode_operations()
-
-if __name__ == "__main__":
-    main()
+    items = session.query(Item).all()
+    if items:
+        inventory_data = []
+        for item in items:
+            inventory_data.append({
+                "Department": item.department.name,
+                "Item Name": item.name,
+                "Barcode": item.barcode,
+                "Quantity": item.quantity,
+                "Low Stock Threshold": item.low_stock_threshold,
+                "Last Updated": item.last_updated.strftime("%Y-%m-%d %H:%M")
+            })
+        
+        df = pd.DataFrame(inventory_data)
+        st.dataframe(df)
+        
+        st.subheader("Low Stock Alerts")
+        low_stock = df[df["Quantity"] < df["Low Stock Threshold"]]
+        if not low_stock.empty:
+            st.dataframe
