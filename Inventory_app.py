@@ -1,15 +1,17 @@
-
+# inventory_app.py
 import streamlit as st
 import pandas as pd
 import av
 import cv2
 import numpy as np
+import base64
 from pyzbar import pyzbar
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import time
 
 # Database setup
 Base = declarative_base()
@@ -70,9 +72,17 @@ def get_table_download_link(df):
     b64 = base64.b64encode(csv.encode()).decode()
     return f'<a href="data:file/csv;base64,{b64}" download="inventory.csv">Download CSV</a>'
 
+def color_stock(val, threshold):
+    if val < threshold:
+        return 'background-color: #ffcccc'  # light red
+    elif val < threshold + 5:
+        return 'background-color: #fff3cd'  # light yellow
+    else:
+        return 'background-color: #d4edda'  # light green
+
 # App pages
 def manage_departments():
-    st.subheader("Department Management")
+    st.header("Department Management")
     
     with st.expander("Add New Department"):
         with st.form("department_form"):
@@ -89,6 +99,7 @@ def manage_departments():
                         session.commit()
                         st.success(f"Department '{dept_name}' added!")
                     except:
+                        session.rollback()
                         st.error("Department name already exists")
 
     with st.expander("Edit/Delete Departments"):
@@ -117,7 +128,7 @@ def manage_departments():
             st.info("No departments found")
 
 def manage_items():
-    st.subheader("Item Management")
+    st.header("Item Management")
     
     departments = session.query(Department).all()
     if not departments:
@@ -149,6 +160,7 @@ def manage_items():
                         session.commit()
                         st.success("Item added successfully!")
                     except:
+                        session.rollback()
                         st.error("Barcode must be unique")
 
     with st.expander("Edit/Delete Items"):
@@ -175,6 +187,7 @@ def manage_items():
                     selected_item.barcode = new_barcode
                     selected_item.quantity = new_qty
                     selected_item.low_stock_threshold = new_threshold
+                    selected_item.last_updated = datetime.now()
                     session.commit()
                     st.success("Item updated!")
                 if delete_btn:
@@ -185,7 +198,7 @@ def manage_items():
             st.info("No items found")
 
 def view_inventory():
-    st.subheader("Current Inventory")
+    st.header("Current Inventory")
     
     items = session.query(Item).all()
     if items:
@@ -201,9 +214,71 @@ def view_inventory():
             })
         
         df = pd.DataFrame(inventory_data)
-        st.dataframe(df)
         
+        # Color the stock levels
+        styled_df = df.style.apply(
+            lambda x: [color_stock(v, x["Low Stock Threshold"]) for v in x["Quantity"]],
+            axis=1
+        )
+        
+        st.dataframe(styled_df)
+
+        # CSV Download link
+        st.markdown(get_table_download_link(df), unsafe_allow_html=True)
+
+        # Low stock alerts
         st.subheader("Low Stock Alerts")
         low_stock = df[df["Quantity"] < df["Low Stock Threshold"]]
         if not low_stock.empty:
-            st.dataframe
+            st.warning("Some items are below their low stock thresholds!")
+            st.dataframe(low_stock)
+        else:
+            st.success("All stock levels are sufficient.")
+    else:
+        st.info("No items in inventory yet.")
+
+def scan_barcode():
+    st.header("Scan Item Barcode")
+    ctx = webrtc_streamer(key="barcode", video_processor_factory=BarcodeProcessor)
+
+    if ctx.video_processor and ctx.video_processor.last_detected_barcode:
+        barcode = ctx.video_processor.last_detected_barcode
+        st.success(f"Detected Barcode: {barcode}")
+        
+        # Audio beep
+        st.audio("https://www.soundjay.com/buttons/sounds/button-3.mp3", format="audio/mp3")
+
+        # Lookup item
+        item = session.query(Item).filter_by(barcode=barcode).first()
+        if item:
+            st.info(f"Item Found: {item.name} ({item.quantity} available)")
+
+            with st.form("stock_update_form"):
+                qty_change = st.number_input("Change in Quantity (+ to add, - to reduce)", value=0)
+                note = st.text_input("Note (optional)")
+                submit = st.form_submit_button("Update Stock")
+
+                if submit:
+                    item.quantity += qty_change
+                    item.last_updated = datetime.now()
+                    session.add(StockHistory(item_id=item.id, change=qty_change, note=note))
+                    session.commit()
+                    st.success("Stock updated successfully!")
+                    time.sleep(1)
+                    st.experimental_rerun()
+        else:
+            st.error("Item not found in database.")
+
+# Sidebar navigation
+st.sidebar.title("Inventory Management")
+page = st.sidebar.radio("Go to", ["Manage Departments", "Manage Items", "View Inventory", "Scan Barcode"])
+
+if page == "Manage Departments":
+    manage_departments()
+elif page == "Manage Items":
+    manage_items()
+elif page == "View Inventory":
+    view_inventory()
+elif page == "Scan Barcode":
+    scan_barcode()
+        
