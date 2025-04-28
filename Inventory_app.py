@@ -11,7 +11,6 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
-import time
 
 # Database setup
 Base = declarative_base()
@@ -37,248 +36,197 @@ class Item(Base):
     last_updated = Column(DateTime, default=datetime.now)
     department = relationship("Department", back_populates="items")
 
-class StockHistory(Base):
-    __tablename__ = 'stock_history'
-    id = Column(Integer, primary_key=True)
-    item_id = Column(Integer, ForeignKey('items.id'))
-    change = Column(Integer)
-    timestamp = Column(DateTime, default=datetime.now)
-    note = Column(String(200))
-
 Base.metadata.create_all(engine)
 
-# Barcode scanner component
+# Barcode scanner processor
 class BarcodeProcessor(VideoProcessorBase):
     def __init__(self):
-        self.last_detected_barcode = None
-    
+        self.barcode = None
+
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        detected_barcodes = pyzbar.decode(img)
-        
-        if detected_barcodes:
-            self.last_detected_barcode = detected_barcodes[0].data.decode("utf-8")
-            for barcode in detected_barcodes:
-                (x, y, w, h) = barcode.rect
-                cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        else:
-            self.last_detected_barcode = None
-            
+        detected = pyzbar.decode(img)
+        if detected:
+            self.barcode = detected[0].data.decode("utf-8")
+            (x, y, w, h) = detected[0].rect
+            cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# Helper functions
-def get_table_download_link(df):
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    return f'<a href="data:file/csv;base64,{b64}" download="inventory.csv">Download CSV</a>'
+# Helper function
+def scan_barcode():
+    st.info("Start Scanning...")
+    ctx = webrtc_streamer(key="barcode", video_processor_factory=BarcodeProcessor)
+    if ctx.video_processor and ctx.video_processor.barcode:
+        return ctx.video_processor.barcode
+    return None
 
-def color_stock(val, threshold):
-    if val < threshold:
-        return 'background-color: #ffcccc'  # light red
-    elif val < threshold + 5:
-        return 'background-color: #fff3cd'  # light yellow
-    else:
-        return 'background-color: #d4edda'  # light green
+# Home Page
+def home():
+    st.title("Inventory Management")
 
-# App pages
-def manage_departments():
-    st.header("Department Management")
+    st.markdown("---")
+    col1, col2, col3, col4 = st.columns(4)
     
-    with st.expander("Add New Department"):
-        with st.form("department_form"):
-            dept_name = st.text_input("Department Name")
-            submit = st.form_submit_button("Add Department")
-            
-            if submit:
-                if not dept_name:
-                    st.error("Please enter a department name")
-                else:
-                    try:
-                        new_dept = Department(name=dept_name)
-                        session.add(new_dept)
-                        session.commit()
-                        st.success(f"Department '{dept_name}' added!")
-                    except:
-                        session.rollback()
-                        st.error("Department name already exists")
+    with col1:
+        if st.button("➕ IN", use_container_width=True):
+            st.session_state.page = "in"
+    with col2:
+        if st.button("➖ OUT", use_container_width=True):
+            st.session_state.page = "out"
+    with col3:
+        if st.button("🔎 RETRIEVE", use_container_width=True):
+            st.session_state.page = "retrieve"
+    with col4:
+        if st.button("📋 VIEW INVENTORY", use_container_width=True):
+            st.session_state.page = "view"
 
-    with st.expander("Edit/Delete Departments"):
-        departments = session.query(Department).all()
-        if departments:
-            selected_dept = st.selectbox("Select Department", 
-                                        departments, format_func=lambda x: x.name)
-            
-            with st.form("edit_dept_form"):
-                new_name = st.text_input("New Name", value=selected_dept.name)
-                col1, col2 = st.columns(2)
-                with col1:
-                    update_btn = st.form_submit_button("Update")
-                with col2:
-                    delete_btn = st.form_submit_button("Delete")
-                
-                if update_btn:
-                    selected_dept.name = new_name
-                    session.commit()
-                    st.success("Department updated!")
-                if delete_btn:
-                    session.delete(selected_dept)
-                    session.commit()
-                    st.success("Department deleted!")
+    st.markdown("---")
+
+# Add Quantity
+def inventory_in():
+    st.subheader("Add Stock (IN)")
+    barcode = scan_barcode()
+    if barcode:
+        item = session.query(Item).filter_by(barcode=barcode).first()
+        if item:
+            qty = st.number_input(f"Enter quantity to ADD for '{item.name}':", min_value=1)
+            if st.button("Update Stock"):
+                item.quantity += qty
+                item.last_updated = datetime.now()
+                session.commit()
+                st.success(f"Added {qty} to '{item.name}'")
         else:
-            st.info("No departments found")
+            st.error("Item not found in inventory!")
 
-def manage_items():
-    st.header("Item Management")
-    
-    departments = session.query(Department).all()
-    if not departments:
-        st.warning("Create departments first")
-        return
-    
-    with st.expander("Add New Item"):
-        with st.form("item_form"):
-            dept = st.selectbox("Department", departments, format_func=lambda x: x.name)
-            item_name = st.text_input("Item Name")
-            barcode = st.text_input("Barcode")
-            quantity = st.number_input("Initial Quantity", min_value=0)
-            low_stock = st.number_input("Low Stock Threshold", min_value=1)
-            submit = st.form_submit_button("Add Item")
-            
-            if submit:
-                if not item_name or not barcode:
-                    st.error("Please fill all required fields")
+# Remove Quantity
+def inventory_out():
+    st.subheader("Remove Stock (OUT)")
+    barcode = scan_barcode()
+    if barcode:
+        item = session.query(Item).filter_by(barcode=barcode).first()
+        if item:
+            qty = st.number_input(f"Enter quantity to REMOVE from '{item.name}':", min_value=1)
+            if st.button("Update Stock"):
+                if item.quantity >= qty:
+                    item.quantity -= qty
+                    item.last_updated = datetime.now()
+                    session.commit()
+                    st.success(f"Removed {qty} from '{item.name}'")
                 else:
-                    try:
-                        new_item = Item(
-                            name=item_name,
-                            barcode=barcode,
-                            quantity=quantity,
-                            low_stock_threshold=low_stock,
-                            department_id=dept.id
-                        )
-                        session.add(new_item)
-                        session.commit()
-                        st.success("Item added successfully!")
-                    except:
-                        session.rollback()
-                        st.error("Barcode must be unique")
-
-    with st.expander("Edit/Delete Items"):
-        items = session.query(Item).all()
-        if items:
-            selected_item = st.selectbox("Select Item", 
-                                       items, format_func=lambda x: f"{x.name} ({x.department.name})")
-            
-            with st.form("edit_item_form"):
-                new_name = st.text_input("Name", value=selected_item.name)
-                new_barcode = st.text_input("Barcode", value=selected_item.barcode)
-                new_qty = st.number_input("Quantity", value=selected_item.quantity)
-                new_threshold = st.number_input("Low Stock Threshold", 
-                                                value=selected_item.low_stock_threshold)
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    update_btn = st.form_submit_button("Update")
-                with col2:
-                    delete_btn = st.form_submit_button("Delete")
-                
-                if update_btn:
-                    selected_item.name = new_name
-                    selected_item.barcode = new_barcode
-                    selected_item.quantity = new_qty
-                    selected_item.low_stock_threshold = new_threshold
-                    selected_item.last_updated = datetime.now()
-                    session.commit()
-                    st.success("Item updated!")
-                if delete_btn:
-                    session.delete(selected_item)
-                    session.commit()
-                    st.success("Item deleted!")
+                    st.error("Not enough stock to remove!")
         else:
-            st.info("No items found")
+            st.error("Item not found in inventory!")
 
+# Retrieve Info
+def retrieve_item():
+    st.subheader("Retrieve Item Info")
+    barcode = scan_barcode()
+    if barcode:
+        item = session.query(Item).filter_by(barcode=barcode).first()
+        if item:
+            st.success(f"Item: {item.name}")
+            st.info(f"Quantity: {item.quantity}")
+            st.info(f"Department: {item.department.name}")
+            st.info(f"Low Stock Threshold: {item.low_stock_threshold}")
+        else:
+            st.error("Item not found!")
+
+# View Inventory
 def view_inventory():
-    st.header("Current Inventory")
-    
+    st.subheader("Current Inventory")
     items = session.query(Item).all()
     if items:
-        inventory_data = []
-        for item in items:
-            inventory_data.append({
-                "Department": item.department.name,
-                "Item Name": item.name,
-                "Barcode": item.barcode,
-                "Quantity": item.quantity,
-                "Low Stock Threshold": item.low_stock_threshold,
-                "Last Updated": item.last_updated.strftime("%Y-%m-%d %H:%M")
-            })
-        
-        df = pd.DataFrame(inventory_data)
-        
-        # Color the stock levels
-        styled_df = df.style.apply(
-            lambda x: [color_stock(v, x["Low Stock Threshold"]) for v in x["Quantity"]],
-            axis=1
-        )
-        
-        st.dataframe(styled_df)
-
-        # CSV Download link
-        st.markdown(get_table_download_link(df), unsafe_allow_html=True)
-
-        # Low stock alerts
-        st.subheader("Low Stock Alerts")
-        low_stock = df[df["Quantity"] < df["Low Stock Threshold"]]
-        if not low_stock.empty:
-            st.warning("Some items are below their low stock thresholds!")
-            st.dataframe(low_stock)
-        else:
-            st.success("All stock levels are sufficient.")
+        data = [{
+            "Item": i.name,
+            "Barcode": i.barcode,
+            "Quantity": i.quantity,
+            "Department": i.department.name,
+            "Low Stock Threshold": i.low_stock_threshold,
+            "Last Updated": i.last_updated.strftime("%Y-%m-%d %H:%M")
+        } for i in items]
+        df = pd.DataFrame(data)
+        st.dataframe(df)
     else:
         st.info("No items in inventory yet.")
 
-def scan_barcode():
-    st.header("Scan Item Barcode")
-    ctx = webrtc_streamer(key="barcode", video_processor_factory=BarcodeProcessor)
+# Add New Item
+def add_new_item():
+    st.subheader("Add New Item")
+    barcode = scan_barcode()
+    if barcode:
+        st.success(f"Scanned Barcode: {barcode}")
+        departments = session.query(Department).all()
+        if not departments:
+            st.error("No departments found! Please add departments first.")
+            return
 
-    if ctx.video_processor and ctx.video_processor.last_detected_barcode:
-        barcode = ctx.video_processor.last_detected_barcode
-        st.success(f"Detected Barcode: {barcode}")
-        
-        # Audio beep
-        st.audio("https://www.soundjay.com/buttons/sounds/button-3.mp3", format="audio/mp3")
+        with st.form("item_form"):
+            dept = st.selectbox("Select Department", departments, format_func=lambda x: x.name)
+            name = st.text_input("Item Name")
+            quantity = st.number_input("Initial Quantity", min_value=0)
+            threshold = st.number_input("Low Stock Threshold", min_value=1)
+            submit = st.form_submit_button("Add Item")
 
-        # Lookup item
-        item = session.query(Item).filter_by(barcode=barcode).first()
-        if item:
-            st.info(f"Item Found: {item.name} ({item.quantity} available)")
-
-            with st.form("stock_update_form"):
-                qty_change = st.number_input("Change in Quantity (+ to add, - to reduce)", value=0)
-                note = st.text_input("Note (optional)")
-                submit = st.form_submit_button("Update Stock")
-
-                if submit:
-                    item.quantity += qty_change
-                    item.last_updated = datetime.now()
-                    session.add(StockHistory(item_id=item.id, change=qty_change, note=note))
+            if submit:
+                try:
+                    item = Item(
+                        name=name,
+                        barcode=barcode,
+                        quantity=quantity,
+                        low_stock_threshold=threshold,
+                        department_id=dept.id
+                    )
+                    session.add(item)
                     session.commit()
-                    st.success("Stock updated successfully!")
-                    time.sleep(1)
-                    st.experimental_rerun()
-        else:
-            st.error("Item not found in database.")
+                    st.success(f"Item '{name}' added successfully!")
+                except:
+                    st.error("Barcode must be unique or another error occurred.")
 
-# Sidebar navigation
-st.sidebar.title("Inventory Management")
-page = st.sidebar.radio("Go to", ["Manage Departments", "Manage Items", "View Inventory", "Scan Barcode"])
+# Department Management
+def manage_departments():
+    st.subheader("Manage Departments")
+    with st.form("add_dept"):
+        name = st.text_input("Department Name")
+        submit = st.form_submit_button("Add Department")
+        if submit:
+            if name:
+                try:
+                    dept = Department(name=name)
+                    session.add(dept)
+                    session.commit()
+                    st.success(f"Department '{name}' added!")
+                except:
+                    st.error("Department name must be unique.")
 
-if page == "Manage Departments":
-    manage_departments()
-elif page == "Manage Items":
-    manage_items()
-elif page == "View Inventory":
-    view_inventory()
-elif page == "Scan Barcode":
-    scan_barcode()
-        
+# Main app controller
+def main():
+    if "page" not in st.session_state:
+        st.session_state.page = "home"
+
+    if st.session_state.page == "home":
+        home()
+    elif st.session_state.page == "in":
+        inventory_in()
+    elif st.session_state.page == "out":
+        inventory_out()
+    elif st.session_state.page == "retrieve":
+        retrieve_item()
+    elif st.session_state.page == "view":
+        view_inventory()
+    elif st.session_state.page == "add":
+        add_new_item()
+    elif st.session_state.page == "dept":
+        manage_departments()
+
+    # Navigation footer
+    st.sidebar.title("Navigation")
+    if st.sidebar.button("Home"):
+        st.session_state.page = "home"
+    if st.sidebar.button("Add Item"):
+        st.session_state.page = "add"
+    if st.sidebar.button("Manage Departments"):
+        st.session_state.page = "dept"
+
+if __name__ == "__main__":
+    main()
+            
