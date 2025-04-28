@@ -1,10 +1,13 @@
 # inventory_app.py
+
 import streamlit as st
 import pandas as pd
 import av
 import cv2
 import numpy as np
+import altair as alt
 import base64
+import time
 from pyzbar import pyzbar
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.ext.declarative import declarative_base
@@ -36,197 +39,217 @@ class Item(Base):
     last_updated = Column(DateTime, default=datetime.now)
     department = relationship("Department", back_populates="items")
 
+class StockHistory(Base):
+    __tablename__ = 'stock_history'
+    id = Column(Integer, primary_key=True)
+    item_id = Column(Integer, ForeignKey('items.id'))
+    change = Column(Integer)
+    timestamp = Column(DateTime, default=datetime.now)
+    note = Column(String(200))
+
 Base.metadata.create_all(engine)
 
 # Barcode scanner processor
 class BarcodeProcessor(VideoProcessorBase):
     def __init__(self):
-        self.barcode = None
+        self.last_detected_barcode = None
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        detected = pyzbar.decode(img)
-        if detected:
-            self.barcode = detected[0].data.decode("utf-8")
-            (x, y, w, h) = detected[0].rect
-            cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        detected_barcodes = pyzbar.decode(img)
+
+        if detected_barcodes:
+            self.last_detected_barcode = detected_barcodes[0].data.decode("utf-8")
+            for barcode in detected_barcodes:
+                (x, y, w, h) = barcode.rect
+                cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        else:
+            self.last_detected_barcode = None
+
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# Helper function
-def scan_barcode():
-    st.info("Start Scanning...")
-    ctx = webrtc_streamer(key="barcode", video_processor_factory=BarcodeProcessor)
-    if ctx.video_processor and ctx.video_processor.barcode:
-        return ctx.video_processor.barcode
+# Helper function to scan barcode
+def scan_barcode(label="Scan Barcode"):
+    st.info(label)
+    ctx = webrtc_streamer(
+        key=label,
+        video_processor_factory=BarcodeProcessor,
+        media_stream_constraints={"video": True, "audio": False},
+    )
+
+    if ctx.video_processor:
+        if ctx.video_processor.last_detected_barcode:
+            barcode = ctx.video_processor.last_detected_barcode
+            st.success(f"Detected Barcode: {barcode}")
+            time.sleep(1)
+            ctx.stop()
+            return barcode
     return None
 
-# Home Page
+# Home page
 def home():
-    st.title("Inventory Management")
+    st.title("Inventory Management System")
 
-    st.markdown("---")
-    col1, col2, col3, col4 = st.columns(4)
-    
+    col1, col2, col3 = st.columns(3)
+
     with col1:
-        if st.button("➕ IN", use_container_width=True):
-            st.session_state.page = "in"
+        if st.button("IN (Add Stock)"):
+            handle_in_out(is_in=True)
+
     with col2:
-        if st.button("➖ OUT", use_container_width=True):
-            st.session_state.page = "out"
+        if st.button("OUT (Remove Stock)"):
+            handle_in_out(is_in=False)
+
     with col3:
-        if st.button("🔎 RETRIEVE", use_container_width=True):
-            st.session_state.page = "retrieve"
-    with col4:
-        if st.button("📋 VIEW INVENTORY", use_container_width=True):
-            st.session_state.page = "view"
+        if st.button("ADD New Item"):
+            add_new_item()
 
     st.markdown("---")
+    
+    col4, col5 = st.columns(2)
 
-# Add Quantity
-def inventory_in():
-    st.subheader("Add Stock (IN)")
-    barcode = scan_barcode()
+    with col4:
+        if st.button("Retrieve Item Info"):
+            retrieve_item()
+
+    with col5:
+        if st.button("Analytics & Trends"):
+            view_analytics()
+
+# Handle IN (add stock) or OUT (remove stock)
+def handle_in_out(is_in=True):
+    action = "Adding to" if is_in else "Removing from"
+    st.header(f"{action} Inventory")
+    barcode = scan_barcode(f"{action} Inventory - Scan Barcode")
     if barcode:
         item = session.query(Item).filter_by(barcode=barcode).first()
         if item:
-            qty = st.number_input(f"Enter quantity to ADD for '{item.name}':", min_value=1)
-            if st.button("Update Stock"):
-                item.quantity += qty
+            qty = st.number_input("Enter Quantity", min_value=1, step=1)
+            if st.button("Submit"):
+                change = qty if is_in else -qty
+                item.quantity += change
                 item.last_updated = datetime.now()
+
+                # Save history
+                history = StockHistory(item_id=item.id, change=change, note="IN" if is_in else "OUT")
+                session.add(history)
+
                 session.commit()
-                st.success(f"Added {qty} to '{item.name}'")
+                st.success(f"Inventory updated for '{item.name}'!")
         else:
-            st.error("Item not found in inventory!")
+            st.error("Item not found! Please add the item first.")
 
-# Remove Quantity
-def inventory_out():
-    st.subheader("Remove Stock (OUT)")
-    barcode = scan_barcode()
-    if barcode:
-        item = session.query(Item).filter_by(barcode=barcode).first()
-        if item:
-            qty = st.number_input(f"Enter quantity to REMOVE from '{item.name}':", min_value=1)
-            if st.button("Update Stock"):
-                if item.quantity >= qty:
-                    item.quantity -= qty
-                    item.last_updated = datetime.now()
-                    session.commit()
-                    st.success(f"Removed {qty} from '{item.name}'")
-                else:
-                    st.error("Not enough stock to remove!")
-        else:
-            st.error("Item not found in inventory!")
-
-# Retrieve Info
-def retrieve_item():
-    st.subheader("Retrieve Item Info")
-    barcode = scan_barcode()
-    if barcode:
-        item = session.query(Item).filter_by(barcode=barcode).first()
-        if item:
-            st.success(f"Item: {item.name}")
-            st.info(f"Quantity: {item.quantity}")
-            st.info(f"Department: {item.department.name}")
-            st.info(f"Low Stock Threshold: {item.low_stock_threshold}")
-        else:
-            st.error("Item not found!")
-
-# View Inventory
-def view_inventory():
-    st.subheader("Current Inventory")
-    items = session.query(Item).all()
-    if items:
-        data = [{
-            "Item": i.name,
-            "Barcode": i.barcode,
-            "Quantity": i.quantity,
-            "Department": i.department.name,
-            "Low Stock Threshold": i.low_stock_threshold,
-            "Last Updated": i.last_updated.strftime("%Y-%m-%d %H:%M")
-        } for i in items]
-        df = pd.DataFrame(data)
-        st.dataframe(df)
-    else:
-        st.info("No items in inventory yet.")
-
-# Add New Item
+# Add new item (scan first)
 def add_new_item():
-    st.subheader("Add New Item")
-    barcode = scan_barcode()
+    st.header("Add New Item to Inventory")
+    barcode = scan_barcode("Add New Item - Scan Barcode")
     if barcode:
-        st.success(f"Scanned Barcode: {barcode}")
         departments = session.query(Department).all()
         if not departments:
-            st.error("No departments found! Please add departments first.")
+            st.warning("Please add at least one department first!")
             return
-
-        with st.form("item_form"):
+        
+        with st.form("add_item_form"):
             dept = st.selectbox("Select Department", departments, format_func=lambda x: x.name)
-            name = st.text_input("Item Name")
+            item_name = st.text_input("Item Name")
             quantity = st.number_input("Initial Quantity", min_value=0)
-            threshold = st.number_input("Low Stock Threshold", min_value=1)
+            low_stock = st.number_input("Low Stock Threshold", min_value=1)
             submit = st.form_submit_button("Add Item")
 
             if submit:
-                try:
-                    item = Item(
-                        name=name,
-                        barcode=barcode,
-                        quantity=quantity,
-                        low_stock_threshold=threshold,
-                        department_id=dept.id
-                    )
-                    session.add(item)
-                    session.commit()
-                    st.success(f"Item '{name}' added successfully!")
-                except:
-                    st.error("Barcode must be unique or another error occurred.")
+                new_item = Item(
+                    name=item_name,
+                    barcode=barcode,
+                    quantity=quantity,
+                    low_stock_threshold=low_stock,
+                    department_id=dept.id
+                )
+                session.add(new_item)
+                session.commit()
+                st.success(f"Item '{item_name}' added successfully!")
 
-# Department Management
-def manage_departments():
-    st.subheader("Manage Departments")
-    with st.form("add_dept"):
-        name = st.text_input("Department Name")
-        submit = st.form_submit_button("Add Department")
-        if submit:
-            if name:
-                try:
-                    dept = Department(name=name)
-                    session.add(dept)
-                    session.commit()
-                    st.success(f"Department '{name}' added!")
-                except:
-                    st.error("Department name must be unique.")
+# Retrieve item info
+def retrieve_item():
+    st.header("Retrieve Item Information")
+    barcode = scan_barcode("Retrieve Item Info - Scan Barcode")
+    if barcode:
+        item = session.query(Item).filter_by(barcode=barcode).first()
+        if item:
+            st.subheader(f"Item: {item.name}")
+            st.write(f"**Department:** {item.department.name}")
+            st.write(f"**Current Quantity:** {item.quantity}")
+            st.write(f"**Low Stock Threshold:** {item.low_stock_threshold}")
+            st.write(f"**Last Updated:** {item.last_updated.strftime('%Y-%m-%d %H:%M')}")
+
+            # Show quantity trend
+            history = session.query(StockHistory).filter_by(item_id=item.id).order_by(StockHistory.timestamp).all()
+            if history:
+                trend_data = pd.DataFrame({
+                    "Timestamp": [h.timestamp for h in history],
+                    "Quantity Change": [h.change for h in history]
+                })
+                trend_data["Running Quantity"] = trend_data["Quantity Change"].cumsum() + item.quantity - trend_data["Quantity Change"].sum()
+
+                chart = alt.Chart(trend_data).mark_line(point=True).encode(
+                    x="Timestamp:T",
+                    y="Running Quantity:Q"
+                ).properties(
+                    title="Quantity Trend Over Time"
+                )
+                st.altair_chart(chart, use_container_width=True)
+        else:
+            st.error("Item not found!")
+
+# View analytics and trends
+def view_analytics():
+    st.header("Inventory Analytics and Trends")
+    items = session.query(Item).all()
+    
+    if items:
+        df = pd.DataFrame([{
+            "Item Name": item.name,
+            "Department": item.department.name,
+            "Quantity": item.quantity,
+            "Low Stock Threshold": item.low_stock_threshold,
+            "Last Updated": item.last_updated
+        } for item in items])
+
+        st.dataframe(df)
+
+        # Inventory levels bar chart
+        bar_chart = alt.Chart(df).mark_bar().encode(
+            x="Item Name",
+            y="Quantity",
+            color="Department"
+        ).properties(
+            title="Inventory Levels by Item",
+            width=700,
+            height=400
+        )
+        st.altair_chart(bar_chart, use_container_width=True)
+
+        # Low stock items
+        st.subheader("Low Stock Items")
+        low_stock_df = df[df["Quantity"] < df["Low Stock Threshold"]]
+        if not low_stock_df.empty:
+            st.dataframe(low_stock_df)
+        else:
+            st.success("All stock levels are sufficient.")
+    else:
+        st.info("No items found.")
 
 # Main app controller
 def main():
-    if "page" not in st.session_state:
-        st.session_state.page = "home"
+    menu = ["Home", "Manage Departments", "View Inventory"]
+    choice = st.sidebar.selectbox("Menu", menu)
 
-    if st.session_state.page == "home":
+    if choice == "Home":
         home()
-    elif st.session_state.page == "in":
-        inventory_in()
-    elif st.session_state.page == "out":
-        inventory_out()
-    elif st.session_state.page == "retrieve":
-        retrieve_item()
-    elif st.session_state.page == "view":
-        view_inventory()
-    elif st.session_state.page == "add":
-        add_new_item()
-    elif st.session_state.page == "dept":
+    elif choice == "Manage Departments":
         manage_departments()
-
-    # Navigation footer
-    st.sidebar.title("Navigation")
-    if st.sidebar.button("Home"):
-        st.session_state.page = "home"
-    if st.sidebar.button("Add Item"):
-        st.session_state.page = "add"
-    if st.sidebar.button("Manage Departments"):
-        st.session_state.page = "dept"
+    elif choice == "View Inventory":
+        view_inventory()
 
 if __name__ == "__main__":
     main()
-            
+    
